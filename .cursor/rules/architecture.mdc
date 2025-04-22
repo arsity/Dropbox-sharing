@@ -1,0 +1,14 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Dropbox-like File Sharing Simulator Architecture
+
+This project implements a file sharing simulator using a client-server model.
+
+## Core Components
+
+*   **Server (`[server.py](mdc:server.py)`)**: Manages the central file system state and handles client requests. The main entry point for starting the server is `[main_server.py](mdc:main_server.py)`.
+*   **Client (`[client.py](mdc:client.py)`)**: Manages a local replica of the shared folder, monitors local changes, and synchronizes with the server. The main entry point for starting a client is `[main_client.py](mdc:main_client.py)`.
+*   **Protocol (`[protocol.py](mdc:protocol.py)`)**: Defines the communication rules and message formats between the server and clients.
