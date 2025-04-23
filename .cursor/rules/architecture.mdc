@@ -1,11 +1,13 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
 # Dropbox-like File Sharing Simulator Architecture
 
 This project implements a file sharing simulator using a client-server model.
+
+For simplicity, we only consider one user and no GUI, authentication, and security design.
 
 ## Core Components
 
