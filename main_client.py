@@ -26,7 +26,7 @@ def parse_arguments():
     parser.add_argument(
         "--folder", type=str, default="client_folder", help="Path to the local folder"
     )
-    parser.add_argument("--poll", type=int, default=5, help="Poll interval in seconds")
+    parser.add_argument("--poll", type=int, default=1, help="Poll interval in seconds")
 
     return parser.parse_args()
 

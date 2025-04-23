@@ -192,7 +192,7 @@ class FileClient:
         server_host: str,
         server_port: int,
         local_folder: str,
-        poll_interval: int = 5,
+        poll_interval: int = 1,
     ):
         """
         Initialize the file client.
@@ -446,16 +446,44 @@ class FileClient:
                     self._apply_remote_deletion(path)
 
             elif action == protocol.ACTION_SEND_UPDATES:
-                # Updates list
+                # Response to our periodic update request
                 self._process_updates(payload)
+
+            elif action == protocol.ACTION_SEND_ALL_FILES:
+                # Response to our initial full sync request
+                # Note: This is usually handled in _full_sync_with_server,
+                # but handling here provides robustness if messages interleave.
+                self._process_all_files(payload)
+                sync_start_time = payload.get("sync_start_time")
+                if sync_start_time:
+                    self.last_sync_time = sync_start_time
+                    logger.info(
+                        f"Processed full file list. Set last_sync_time to {sync_start_time}"
+                    )
+                else:
+                    self.last_sync_time = time.time()
+                    logger.warning(
+                        "Processed full file list, but no sync_start_time received. Using current time."
+                    )
+
+            elif action == protocol.ACTION_ACK:
+                # Acknowledgement from server (e.g., after sending a local change)
+                logger.debug(f"Received ACK: {payload.get('message', 'OK')}")
+                # No specific action needed for most ACKs here
 
             elif action == protocol.ACTION_ERROR:
                 # Error from server
                 error_message = payload.get("message", "Unknown error")
                 logger.error(f"Server error: {error_message}")
 
+            else:
+                logger.warning(f"Unhandled message action received: {action}")
+
         except Exception as e:
             logger.exception(f"Error processing incoming message: {e}")
+            # Assume connection might be broken
+            if isinstance(e, (ConnectionError, OSError)):
+                self.socket = None
 
     def _sync_with_server(self) -> None:
         """
@@ -476,70 +504,22 @@ class FileClient:
 
     def _request_updates(self) -> None:
         """
-        Request updates from the server.
+        Request updates from the server. (Does not wait for response).
         """
-        # Create and send the request
-        request = protocol.create_request_updates_message(self.last_sync_time)
-        protocol.send_message(self.socket, request)
+        if not self.socket:
+            return
 
-        # Wait for response
-        response = protocol.receive_message(self.socket)
-        action = response.get("action")
-
-        # Process the response based on action type
-        if action == protocol.ACTION_SEND_UPDATES:
-            # Standard update response with a list of changes
-            self._process_updates(response.get("payload", {}))
-        elif (
-            action == protocol.ACTION_CREATE_FILE
-            or action == protocol.ACTION_UPDATE_FILE
-        ):
-            # Direct file update from server (broadcast from another client)
-            payload = response.get("payload", {})
-            path = payload.get("path")
-            data = payload.get("data")
-
-            if path:
-                abs_path = os.path.join(self.local_folder_path, path)
-                try:
-                    # Tell the event handler to ignore this event
-                    self.event_handler.ignore_next_event_for(abs_path)
-
-                    # Ensure the parent directory exists
-                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
-
-                    # Create/update the file
-                    protocol.decode_file_data(data, abs_path)
-                    logger.info(f"Received file update: {path}")
-                except Exception as e:
-                    logger.exception(f"Error applying file update for {path}: {e}")
-        elif action == protocol.ACTION_DELETE_FILE:
-            # File deletion from server
-            payload = response.get("payload", {})
-            path = payload.get("path")
-
-            if path:
-                self._apply_remote_deletion(path)
-        elif action == protocol.ACTION_CREATE_FOLDER:
-            # Folder creation from server
-            payload = response.get("payload", {})
-            path = payload.get("path")
-
-            if path:
-                self._apply_remote_folder_creation(path)
-        elif action == protocol.ACTION_DELETE_FOLDER:
-            # Folder deletion from server
-            payload = response.get("payload", {})
-            path = payload.get("path")
-
-            if path:
-                self._apply_remote_deletion(path)
-        elif action == protocol.ACTION_ERROR:
-            # Error from server
-            error_message = response.get("payload", {}).get("message", "Unknown error")
-            logger.error(f"Server error: {error_message}")
-        else:
-            logger.warning(f"Unexpected response to update request: {action}")
+        try:
+            # Create and send the request
+            request = protocol.create_request_updates_message(self.last_sync_time)
+            protocol.send_message(self.socket, request)
+            # NOTE: We no longer wait for or process the response here.
+            # All incoming messages are handled by _process_incoming_message.
+        except Exception as e:
+            logger.exception(f"Error sending update request: {e}")
+            # Assume connection might be broken
+            if isinstance(e, (ConnectionError, OSError)):
+                self.socket = None
 
     def _process_updates(self, updates: Dict[str, Any]) -> None:
         """
@@ -663,8 +643,8 @@ class FileClient:
         if not path.startswith(self.local_folder_path):
             return
 
-        # Get the path relative to the local folder
         rel_path = os.path.relpath(path, self.local_folder_path)
+        action_type = "directory" if is_directory else "file"
 
         with self.sync_lock:
             if not self.socket:
@@ -672,26 +652,26 @@ class FileClient:
 
             try:
                 if is_directory:
-                    # Create a message for folder creation
                     message = protocol.create_folder_message(rel_path)
                 else:
-                    # Create a message for file creation
                     message = protocol.create_file_message(rel_path, path)
 
                 # Send the message
                 protocol.send_message(self.socket, message)
+                logger.info(
+                    f"Sent creation request for {action_type} {rel_path} to server"
+                )
 
-                # Wait for acknowledgment
-                response = protocol.receive_message(self.socket)
-                if response.get("action") == protocol.ACTION_ACK:
-                    logger.info(
-                        f"Created {'directory' if is_directory else 'file'} {rel_path} on server"
-                    )
-                else:
-                    logger.warning(f"Server failed to create {rel_path}: {response}")
+                # NOTE: We no longer wait for ACK here.
+                # ACKs are handled by _process_incoming_message.
 
             except Exception as e:
-                logger.exception(f"Error handling local creation: {e}")
+                logger.exception(
+                    f"Error sending creation request for {action_type} {rel_path}: {e}"
+                )
+                # Assume connection might be broken
+                if isinstance(e, (ConnectionError, OSError)):
+                    self.socket = None
 
     def handle_local_deletion(self, path: str, is_directory: bool) -> None:
         """
@@ -704,8 +684,8 @@ class FileClient:
         if not path.startswith(self.local_folder_path):
             return
 
-        # Get the path relative to the local folder
         rel_path = os.path.relpath(path, self.local_folder_path)
+        action_type = "directory" if is_directory else "file"
 
         with self.sync_lock:
             if not self.socket:
@@ -713,26 +693,26 @@ class FileClient:
 
             try:
                 if is_directory:
-                    # Create a message for folder deletion
                     message = protocol.create_delete_folder_message(rel_path)
                 else:
-                    # Create a message for file deletion
                     message = protocol.create_delete_file_message(rel_path)
 
                 # Send the message
                 protocol.send_message(self.socket, message)
+                logger.info(
+                    f"Sent deletion request for {action_type} {rel_path} to server"
+                )
 
-                # Wait for acknowledgment
-                response = protocol.receive_message(self.socket)
-                if response.get("action") == protocol.ACTION_ACK:
-                    logger.info(
-                        f"Deleted {'directory' if is_directory else 'file'} {rel_path} on server"
-                    )
-                else:
-                    logger.warning(f"Server failed to delete {rel_path}: {response}")
+                # NOTE: We no longer wait for ACK here.
+                # ACKs are handled by _process_incoming_message.
 
             except Exception as e:
-                logger.exception(f"Error handling local deletion: {e}")
+                logger.exception(
+                    f"Error sending deletion request for {action_type} {rel_path}: {e}"
+                )
+                # Assume connection might be broken
+                if isinstance(e, (ConnectionError, OSError)):
+                    self.socket = None
 
     def handle_local_modification(self, path: str) -> None:
         """
@@ -744,7 +724,6 @@ class FileClient:
         if not path.startswith(self.local_folder_path):
             return
 
-        # Get the path relative to the local folder
         rel_path = os.path.relpath(path, self.local_folder_path)
 
         with self.sync_lock:
@@ -752,21 +731,22 @@ class FileClient:
                 return
 
             try:
-                # Create a message for file update
                 message = protocol.create_update_file_message(rel_path, path)
 
                 # Send the message
                 protocol.send_message(self.socket, message)
+                logger.info(f"Sent update request for file {rel_path} to server")
 
-                # Wait for acknowledgment
-                response = protocol.receive_message(self.socket)
-                if response.get("action") == protocol.ACTION_ACK:
-                    logger.info(f"Updated file {rel_path} on server")
-                else:
-                    logger.warning(f"Server failed to update {rel_path}: {response}")
+                # NOTE: We no longer wait for ACK here.
+                # ACKs are handled by _process_incoming_message.
 
             except Exception as e:
-                logger.exception(f"Error handling local modification: {e}")
+                logger.exception(
+                    f"Error sending update request for file {rel_path}: {e}"
+                )
+                # Assume connection might be broken
+                if isinstance(e, (ConnectionError, OSError)):
+                    self.socket = None
 
     def _full_sync_with_server(self) -> None:
         """

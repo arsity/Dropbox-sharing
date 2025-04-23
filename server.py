@@ -660,7 +660,7 @@ class FileServer:
         try:
             # Bind and listen
             self.server_socket.bind((self.host, self.port))
-            self.server_socket.listen(5)
+            self.server_socket.listen(8)
 
             logger.info(f"Server started on {self.host}:{self.port}")
             logger.info(f"Shared folder: {self.shared_folder_path}")
